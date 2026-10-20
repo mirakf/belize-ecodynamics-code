@@ -1,0 +1,207 @@
+// ============================================================================
+// 1. CONFIGURATION & ASSETS
+// ============================================================================
+var YEAR = 2017;  
+var SCALE = 30;
+var MAX_PIXELS = 1e13;
+
+var DATES = {
+  dry:  [(YEAR - 1) + '-12-01', YEAR + '-05-31'],
+  wet:  [YEAR + '-06-01', YEAR + '-11-30'],
+  annual: [YEAR + '-01-01', YEAR + '-12-31']
+};
+
+// Use the bounds of your input image (ensure 'image' is defined in your imports)
+var bounds = image.geometry().bounds();
+var palette = require('users/gena/packages:palettes').misc.tol_rainbow[7];
+
+// ============================================================================
+// 2. HELPER FUNCTIONS
+// ============================================================================
+function maskL8clouds(img) {
+  var qa = img.select('QA_PIXEL');
+  var mask = qa.bitwiseAnd(1 << 3).eq(0).and(qa.bitwiseAnd(1 << 4).eq(0));
+  return img.updateMask(mask);
+}
+
+function applyL8Scaling(img) {
+  var optical = img.select('SR_B.').multiply(0.0000275).add(-0.2);
+  var thermal = img.select('ST_B.*').multiply(0.00341802).add(149.0);
+  return img.addBands(optical, null, true).addBands(thermal, null, true);
+}
+
+// ============================================================================
+// 3. COLLECTION PROCESSING
+// ============================================================================
+
+// Process Landsat 8 (Dry)
+var dry_st_b10_median = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+  .filterBounds(bounds)
+  .filterDate(DATES.dry[0], DATES.dry[1])
+  .map(maskL8clouds)
+  .map(applyL8Scaling)
+  .median()
+  .select(['ST_B10']); // Direct rename
+
+// Process Sentinel-1 (Dry SAR)
+var sar_dry_angle = ee.ImageCollection('COPERNICUS/S1_GRD')
+  .filterBounds(bounds)
+  .filterDate(DATES.dry[0], DATES.dry[1])
+    .filter(ee.Filter.eq('instrumentMode', 'IW'))
+  // 2. Ensure all images have BOTH VV and VH polarizations to keep the collection uniform
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+  .median()
+  .select(['angle']); // Select and rename in one go
+
+var b5 = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+  .filterBounds(bounds)
+  .filterDate(DATES.dry[0], DATES.dry[1])
+  .map(maskL8clouds)
+  .map(applyL8Scaling)
+  .median()
+  .select(['SR_B5']);
+
+// ============================================================================
+// 4. TEXTURE ANALYSIS (GLCM)
+// ============================================================================
+var glcm_band = b5.select('SR_B5');
+var stats = glcm_band.reduceRegion({
+  reducer: ee.Reducer.minMax(),
+  geometry: bounds,
+  scale: 100, // Increased scale for faster calculation
+  bestEffort: true
+});
+
+var quantized = glcm_band
+  .unitScale(ee.Number(stats.get('SR_B5_min')), ee.Number(stats.get('SR_B5_max')))
+  .multiply(31).floor().toInt();
+
+var g4_B5_savg = quantized.glcmTexture({size: 4, average: true})
+  .select(['SR_B5_savg']);
+
+
+// ============================================================================
+// 5. STACKING & CLASSIFICATION
+// ============================================================================
+
+// Combine bands and apply unmask in a single operation
+print(sar_dry_angle)
+var allBands = ee.Image([
+  sar_dry_angle.rename('sar_dry_angle'),
+  dem.select(['b1'], ['elevation']),
+  slope.select(['b1'], ['slope']),
+  precipitat.select(['b1'], ['precipitat']),
+  gpw_count.select(['b1'], ['gpw_count']),
+  g4_B5_savg.rename('g4_sr_b5_savg'),
+  dry_st_b10_median.rename('dry_st_b10_median'),
+  r2015.rename('d2015'),
+  r2011.rename('d2011'),
+  bathy.rename('bathy')
+]).unmask(-9999).clip(bounds);
+print(allBands)
+
+// Classification
+//var savedClassifier = ee.Classifier.load("projects/ee-mirakf-s25/assets/classifier_glcm_march24");
+//var classifierInputProperties = table4.first().propertyNames().remove('system:index').remove('fid'); var cleanNames = classifierInputProperties.map(function(s){return ee.String(s).replace('^[^a-zA-Z0-9_]+', '')}); table4 = table4.select(classifierInputProperties, cleanNames); classifierInputProperties = cleanNames;
+var classifierInputProperties = table4.first().propertyNames().remove('system:index').remove('fid').remove('cid') 
+
+print(classifierInputProperties)
+
+var sample = table4.filter(ee.Filter.notNull(classifierInputProperties))
+
+var sample = sample.map(function(feature) {
+  // Convert the properties to a dictionary
+  var dict = feature.toDictionary(classifierInputProperties);
+  
+  // Map over the dictionary and parse every string value into a number
+  var numericDict = dict.map(function(key, value) {
+    return ee.Number.parse(value);
+  });
+  
+  // Return the feature with the new numeric properties
+  return feature.set(numericDict);
+});
+
+var label = "cid";
+
+print(classifierInputProperties, "test")
+
+print(sample)
+
+// Split into training and validation
+sample = sample.randomColumn('random',42);
+var trainingSample = sample.filter('random <= 0.8');
+var validationSample = sample.filter('random > 0.8');
+
+// Train classifier
+var trainedClassifier = ee.Classifier.smileRandomForest(60).train({
+  features: trainingSample,
+  classProperty: label,
+  inputProperties: classifierInputProperties
+});
+
+// 2. Export the actual classifier itself as a permanent GEE Asset!
+Export.classifier.toAsset({
+  classifier: trainedClassifier,
+  description: 'Export_RF_Belize_Classifier'
+//  assetId: 'users/yourusername/RF_Belize_Classifier' // Replace 'yourusername' with your GEE folder path
+});
+
+var classified = allBands.classify(trainedClassifier);
+//var classified=image2
+
+// Validation accuracy
+validationSample = validationSample.classify(trainedClassifier);
+var validationAccuracy = validationSample.errorMatrix(label, 'classification');
+print('Validation accuracy:', validationAccuracy.accuracy());
+
+Map.addLayer (classified , {min: 1, max: 25, palette: palette}, "classified")
+Export.image.toDrive({
+  image: classified,
+  scale: 30,
+  region: bounds,
+  maxPixels: MAX_PIXELS,
+  shardSize: 256 // Helps with large computations
+});
+// ============================================================================
+// RASTER-TO-RASTER ACCURACY ASSESSMENT (STEP 7 vs. REFERENCE RASTER)
+// ============================================================================
+
+// 1. Define your ground-truth raster and the name of its active band
+// (We are using 'r2015' as the variable, assuming its class band is named 'b1' or 'classification')
+var groundTruthRaster = r2017; // Swap with your exact ground-truth raster variable if different
+var GT_BAND_NAME = 'b1';       // Swap with the band name containing the class IDs in your raster
+
+// 2. Combine your final map and the ground-truth raster into a single multi-band image
+var validationCombined = classified.addBands(
+  groundTruthRaster.select([GT_BAND_NAME], ['ground_truth'])
+);
+
+// 3. Generate a random sample of points across your study area
+// This will extract the pixel values of BOTH maps at 5,000 random locations
+var validationPoints = validationCombined.sample({
+  region: bounds,
+  scale: 30,
+  numPixels: 5000, // Increase to 10000 for a larger sample size if computation holds
+  seed: 42,
+  geometries: true,
+  tileScale: 16   // Prevents memory issues on complex landscapes
+});
+
+// 4. Compute the Error (Confusion) Matrix
+// Parameters: ('actual_ground_truth_property', 'predicted_property')
+var finalErrorMatrix = validationPoints.errorMatrix('ground_truth', 'classification');
+
+print('Overall Accuracy:', finalErrorMatrix.accuracy());
+
+// print('Kappa Coefficient:', finalErrorMatrix.kappa());
+
+// // Producer's Accuracy (Omission errors: how well does the reference map get mapped?)
+// print('Producer\'s Accuracy (Rows):', finalErrorMatrix.producersAccuracy());
+
+// // Consumer's Accuracy / User's Accuracy (Commission errors: how reliable are your mapped classes?)
+// print('Consumer\'s (User\'s) Accuracy (Cols):', finalErrorMatrix.consumersAccuracy());
+
+// // The raw confusion matrix (Rows = Ground Truth Raster, Columns = Your Final Map)
+// print('Raw Confusion Matrix:', finalErrorMatrix);
