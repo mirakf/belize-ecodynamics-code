@@ -1,0 +1,775 @@
+/***** Start of imports. If edited, may not auto-convert in the playground. *****/
+var table = ee.FeatureCollection("projects/cas-belizeecosystem/assets/extentbelize2");
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+
+// ============================================================================
+// 1. GLOBAL CONFIGURATION & STATIC ASSETS
+// ============================================================================
+var SCALE = 30;         // Native Landsat spatial resolution (meters)
+var MAX_PIXELS = 1e13;  // Computation limit safety margin
+
+var countryBounds = table.geometry();
+
+// --- HIGH-CONTRAST ECO-INTUITIVE COLOR PALETTE ---
+var palette = [
+  '#C19A6B', // 1: Agricultural uses (Sandy Orange)
+  '#FFB89E', // 2: Coral reef (Turquoise/Teal)
+  '#8F9779', // 3: Lowland broad-leaved dry forest (Olive Green)
+  '#2E8B57', // 4: Lowland broad-leaved moist forest (Moist Forest Green)
+  '#1E5631', // 5: Lowland broad-leaved moist forest: Steep (Dark Moist Forest)
+  '#A9BA9D', // 6: Lowland broad-leaved moist scrub forest (Soft Sage Green)
+  '#7D8C72', // 7: Lowland broad-leaved moist scrub forest: Steep (Muted Olive Scrub)
+  '#004B23', // 8: Lowland broad-leaved wet forest (Lush Wet Forest Green)
+  '#002A14', // 9: Lowland broad-leaved wet forest: Steep (Deep Abyss Green)
+  '#2D5A27', // 10: Lowland pine forest (Classic Pine Teal-Green)
+  '#E6C229', // 11: Lowland savanna (Gold Savanna Grass)
+  '#FF00FF', // 12: Mangrove (Neon Fuchsia/Magenta)
+  '#84d7eb', // 13: Open sea (Deep Marine Blue)
+  '#20B2AA', // 14: Seagrass (Soft Aquatic Teal)
+  '#D2B48C', // 15: Shrubland (Muted Clay Tan)
+  '#3F6826', // 16: Submontane broad-leaved moist forest (Cool Mountain Green)
+  '#2A4B1A', // 17: Submontane broad-leaved moist forest: Steep (Dark Mountain Green)
+  '#1B3B1F', // 18: Submontane broad-leaved wet forest (Cool Wet Mountain Forest)
+  '#0D2212', // 19: Submontane broad-leaved wet forest: Steep (Ultra-Dark Pine Green)
+  '#3B7A57', // 20: Submontane pine forest (Rich Mountain Pine)
+  '#224D34', // 21: Submontane pine forest: Steep (Dark Mountain Pine)
+  '#36454F', // 22: Urban (Slate/Charcoal Gray)
+  '#A9A9A9', // 23: Wasteland (Medium Gray)
+  '#4169E1', // 24: Water (Inland) (Bright Royal Blue)
+  '#5F9EA0', // 25: Wetland (Marshy Slate Blue)
+  '#58a279'  // 26: Littoral Forest (Highlighter Sage Green)
+];
+
+// Master Database used to build the Visual Legend and evaluate Click Inspections
+var CLASSES_LEGEND = [
+  {id: 1,  name: 'Agricultural uses', color: '#C19A6B'},
+  {id: 2,  name: 'Coral reef', color: '#FFB89E'},
+  {id: 3,  name: 'Lowland broad-leaved dry forest', color: '#8F9779'},
+  {id: 4,  name: 'Lowland broad-leaved moist forest', color: '#2E8B57'},
+  {id: 5,  name: 'Lowland broad-leaved moist forest: Steep', color: '#1E5631'},
+  {id: 6,  name: 'Lowland broad-leaved moist scrub forest', color: '#A9BA9D'},
+  {id: 7,  name: 'Lowland broad-leaved moist scrub forest: Steep', color: '#7D8C72'},
+  {id: 8,  name: 'Lowland broad-leaved wet forest', color: '#004B23'},
+  {id: 9,  name: 'Lowland broad-leaved wet forest: Steep', color: '#002A14'},
+  {id: 10, name: 'Lowland pine forest', color: '#2D5A27'},
+  {id: 11, name: 'Lowland savanna', color: '#E6C229'},
+  {id: 12, name: 'Mangrove', color: '#FF00FF'},
+  {id: 13, name: 'Open sea', color: '#84d7eb'},
+  {id: 14, name: 'Seagrass', color: '#20B2AA'},
+  {id: 15, name: 'Shrubland', color: '#D2B48C'},
+  {id: 16, name: 'Submontane broad-leaved moist forest', color: '#3F6826'},
+  {id: 17, name: 'Submontane broad-leaved moist forest: Steep', color: '#2A4B1A'},
+  {id: 18, name: 'Submontane broad-leaved wet forest', color: '#1B3B1F'},
+  {id: 19, name: 'Submontane broad-leaved wet forest: Steep', color: '#0D2212'},
+  {id: 20, name: 'Submontane pine forest', color: '#3B7A57'},
+  {id: 21, name: 'Submontane pine forest: Steep', color: '#224D34'},
+  {id: 22, name: 'Urban', color: '#36454F'},
+  {id: 23, name: 'Wasteland', color: '#A9A9A9'},
+  {id: 24, name: 'Water (Inland)', color: '#4169E1'},
+  {id: 25, name: 'Wetland', color: '#5F9EA0'},
+  {id: 26, name: 'Littoral Forest', color: '#58a279'}
+];
+
+// ============================================================================
+// 2. PRODUCTION ECOSYSTEM ASSET LOADER
+// ============================================================================
+/**
+ * Instantly loads the pre-stabilized, high-performance ecosystem map from GEE assets.
+ * This completely deletes the heavy on-the-fly random forest computation.
+ */
+function generateEcosystemMap(targetYear) {
+  return ee.Image('projects/cas-belizeecosystem/assets/stabilized_map_' + targetYear);
+}
+
+// ============================================================================
+// 3. USER INTERFACE (UI) DEVELOPMENT & INTERACTIVE CONTROLS
+// ============================================================================
+
+// --- EXPLICIT INSTANCE CAPTURE ---
+var mainMap = ui.root.widgets().get(0);
+
+// --- A. DATA DICTIONARY FOR ECOSYSTEM LOOKUP (With Beautiful Indented Hierarchy) ---
+var ECOSYSTEM_DICT = {
+  'Agricultural Uses': [1],
+  'Coral Reef': [2],
+  'Lowland broad-leaved dry forest': [3],
+  'Lowland broad-leaved moist forest (Combined)': [4, 5],
+  '   →   Lowland Moist: Flat': [4],
+  '   →  Lowland Moist: Steep': [5],
+  'Lowland broad-leaved moist scrub forest (Combined)': [6, 7],
+  '   →  Lowland Moist Scrub: Flat': [6],
+  '   →  Lowland Moist Scrub: Steep': [7],
+  'Lowland broad-leaved wet forest (Combined)': [8, 9],
+  '   →  Lowland Wet: Flat': [8],
+  '   →  Lowland Wet: Steep': [9],
+  'Lowland pine forest': [10],
+  'Lowland savanna': [11],
+  'Mangrove & Littoral Forest (Combined)': [12, 26],
+  '   →  Mangrove Forest': [12],
+  '   →  Littoral Forest': [26],
+  'Open Sea': [13],
+  'Seagrass': [14],
+  'Shrubland': [15],
+  'Submontane broad-leaved moist forest (Combined)': [16, 17],
+  '   →  Submontane Moist: Flat': [16],
+  '   →  Submontane Moist: Steep': [17],
+  'Submontane broad-leaved wet forest (Combined)': [18, 19],
+  '   →  Submontane Wet: Flat': [18],
+  '   →  Submontane Wet: Steep': [19],
+  'Submontane pine forest (Combined)': [20, 21],
+  '   →  Submontane Pine: Flat': [20],
+  '   →  Submontane Pine: Steep': [21],
+  'Urban': [22],
+  'Wasteland': [23],
+  'Water (Inland)': [24],
+  'Wetland': [25]
+};
+
+// --- B. ACTIVE STATE VARIABLES & SWIPE MAPS INITIALIZATION ---
+var currentEcosystemMap = null;     // Holds the processed base map for the active year
+var highlightLayerRef = null;       // Tracks the active spotlight overlay layer
+var lossLayerRef = null;            // Tracks active target ecosystem loss overlay
+var gainLayerRef = null;            // Tracks active target ecosystem gain overlay
+var generalChangeLayerRef = null;   // Tracks active general change overlay
+var mapALayerRef = null;            // Tracks baseline Year A base map layer
+var mapBLayerRef = null;            // Tracks comparison Year B base map layer
+
+// Initialize double map canvases and sync linker for the Swipe Panel
+var leftMap = ui.Map();
+var rightMap = ui.Map();
+leftMap.style().set('cursor', 'crosshair');
+rightMap.style().set('cursor', 'crosshair');
+var swipeLinker = ui.Map.Linker([leftMap, rightMap]); // Synchronizes panning/zooming
+
+var splitPanel = ui.SplitPanel({
+  firstPanel: leftMap,
+  secondPanel: rightMap,
+  orientation: 'horizontal',
+  wipe: true,
+  style: {stretch: 'both'}
+});
+
+// Track markers to sync visual click indicators across Single and Split maps
+var activeMarkers = [];
+function clearMarkers() {
+  activeMarkers.forEach(function(m) {
+    m.map.remove(m.layer);
+  });
+  activeMarkers = [];
+}
+
+// --- C. LEFT SIDEBAR PANEL: GENERAL NAVIGATION ---
+var leftSidebar = ui.Panel([], ui.Panel.Layout.flow('vertical'), {
+  width: '320px',
+  padding: '10px',
+  border: '1px solid #ddd'
+});
+
+var titleLabel = ui.Label({
+  value: 'Belize EcoDynamics Explorer',
+  style: {
+    fontSize: '22px',
+    fontWeight: 'bold',
+    color: '#1B4F72',
+    margin: '10px 0 5px 0'
+  }
+});
+
+var descriptionLabel = ui.Label({
+  value: 'An interactive web application applying a 60-tree Random Forest classifier ' +
+         'and rule-based spatial adjustments to map 26 distinct ecosystems in Belize.',
+  style: {
+    fontSize: '13px',
+    color: '#555',
+    margin: '0 0 5px 0'
+  }
+});
+
+var yearHeader = ui.Label({
+  value: 'Select Assessment Year:',
+  style: {
+    fontSize: '14px',
+    fontWeight: 'bold',
+    color: '#333',
+    margin: '5px 0 5px 0'
+  }
+});
+
+var loadingLabel = ui.Label({
+  value: '',
+  style: {
+    fontSize: '12px',
+    fontStyle: 'italic',
+    color: '#D35400',
+    margin: '5px 0'
+  }
+});
+
+var highlightHeader = ui.Label({
+  value: 'Highlight Ecosystem:',
+  style: {
+    fontSize: '14px',
+    fontWeight: 'bold',
+    color: '#333',
+    margin: '5px 0 5px 0'
+  }
+});
+
+// Helper function to remove only the highlight layer from the map
+function removeHighlightLayer() {
+  if (highlightLayerRef) {
+    mainMap.remove(highlightLayerRef);
+    highlightLayerRef = null;
+  }
+}
+
+// Logic that executes the spotlight overlay (Uses solid high-contrast Neon Yellow)
+function highlightEcosystem(selectedEcoName) {
+  removeHighlightLayer();
+  
+  if (selectedEcoName === 'None (Show Full Map)' || !currentEcosystemMap) {
+    return;
+  }
+  
+  var ecoIds = ECOSYSTEM_DICT[selectedEcoName];
+  var spotlightMask = currentEcosystemMap.eq(ecoIds[0]);
+  for (var k = 1; k < ecoIds.length; k++) {
+    spotlightMask = spotlightMask.or(currentEcosystemMap.eq(ecoIds[k]));
+  }
+  
+  var spotlightLayer = ee.Image(1).updateMask(spotlightMask);
+  highlightLayerRef = mainMap.addLayer(
+    spotlightLayer, 
+    {palette: ['#FFFF00']}, // Highlighted in bright Neon Yellow!
+    'Highlight: ' + selectedEcoName
+  );
+}
+
+var highlightItems = ['None (Show Full Map)'].concat(Object.keys(ECOSYSTEM_DICT));
+
+var ecoDropdown = ui.Select({
+  items: highlightItems,
+  placeholder: 'Highlight an ecosystem...',
+  value: 'None (Show Full Map)',
+  onChange: highlightEcosystem,
+  style: {
+    width: '100%',
+    margin: '5px 0 5px 0'
+  }
+});
+
+function updateMap(selectedYear) {
+  var yearInt = parseInt(selectedYear, 10);
+  loadingLabel.setValue('⚡ Loading ' + selectedYear + ' Stabilized Atlas Map...');
+  
+  // Revert back to Single Map view if currently split using mainMap
+  if (ui.root.widgets().get(1) !== mainMap) {
+    ui.root.widgets().set(1, mainMap);
+  }
+  
+  mainMap.layers().reset();
+  highlightLayerRef = null; 
+  removeChangeLayers();
+  clearMarkers();
+  
+  currentEcosystemMap = generateEcosystemMap(yearInt);
+  mainMap.addLayer(currentEcosystemMap, {min: 1, max: 26, palette: palette}, "Belize Ecosystems: " + selectedYear);
+  
+  var activeEco = ecoDropdown.getValue();
+  if (activeEco && activeEco !== 'None (Show Full Map)') {
+    highlightEcosystem(activeEco);
+  }
+
+  loadingLabel.setValue('');
+}
+
+var yearDropdown = ui.Select({
+  items: ['2015', '2016', '2017', '2018', '2019', '2020', '2021', '2022', '2023', '2024', '2025', '2026'],
+  placeholder: 'Choose an assessment year...',
+  value: '2026',
+  onChange: updateMap,
+  style: {
+    width: '100%',
+    margin: '5px 0 5px 0'
+  }
+});
+
+// --- E. DYNAMIC VERTICAL MAP LEGEND ---
+var legendHeader = ui.Label({
+  value: 'Ecosystem Legend:',
+  style: {fontSize: '14px', fontWeight: 'bold', color: '#333', margin: '15px 0 5px 0'}
+});
+
+var legendPanel = ui.Panel([], ui.Panel.Layout.flow('vertical'), {
+  height: '220px', 
+  border: '1px solid #ccc',
+  padding: '5px',
+  margin: '5px 0 5px 0'
+});
+
+CLASSES_LEGEND.forEach(function(item) {
+  var colorBox = ui.Label({
+    style: {
+      backgroundColor: item.color,
+      padding: '8px',
+      margin: '0 10px 0 0',
+      border: '1px solid #777'
+    }
+  });
+  var nameLabel = ui.Label({
+    value: item.name,
+    style: {fontSize: '11px', margin: '2px 0 0 0'}
+  });
+  
+  var row = ui.Panel([colorBox, nameLabel], ui.Panel.Layout.flow('horizontal'), {
+    margin: '3px 0'
+  });
+  legendPanel.add(row);
+});
+
+// --- F. HISTORICAL PIXEL TIMELINE INSPECTOR ---
+var inspectorHeader = ui.Label({
+  value: 'Historical Pixel Timeline:',
+  style: {fontSize: '14px', fontWeight: 'bold', color: '#333', margin: '15px 0 5px 0'}
+});
+
+var inspectorDesc = ui.Label({
+  value: 'Click on the map to drop an inspection dot and see how that pixel has changed each year.',
+  style: {fontSize: '11px', color: '#777', margin: '0 0 5px 0'}
+});
+
+// EXPANDED HEIGHT: Expanded to 320px to hold the visual trajectory line chart beautifully
+var inspectorResultsPanel = ui.Panel([], ui.Panel.Layout.flow('vertical'), {
+  height: '200px', 
+  border: '1px solid #ccc',
+  padding: '4px',
+  margin: '5px 0'
+});
+
+inspectorResultsPanel.add(ui.Label('Click Map to Inspect History...', {fontSize: '11px', fontStyle: 'italic', color: '#777'}));
+
+// Standardized Map Click function shared across Single and Linked Split map windows
+function onMapClick(coords) {
+  if (!currentEcosystemMap) return;
+  
+  var clickPoint = ee.Geometry.Point([coords.lon, coords.lat]);
+  
+  // Clean old markers and drop synced markers across ALL active viewports (mainMap, Left, Right)
+  clearMarkers();
+  var markerMain = mainMap.addLayer(clickPoint, {color: '#00FFFF'}, 'Inspection Point');
+  var markerLeft = leftMap.addLayer(clickPoint, {color: '#00FFFF'}, 'Inspection Point');
+  var markerRight = rightMap.addLayer(clickPoint, {color: '#00FFFF'}, 'Inspection Point');
+  activeMarkers.push({map: mainMap, layer: markerMain});
+  activeMarkers.push({map: leftMap, layer: markerLeft});
+  activeMarkers.push({map: rightMap, layer: markerRight});
+  
+  inspectorResultsPanel.clear();
+  inspectorResultsPanel.add(ui.Label('⚡ Querying 2015–2026 trajectory...', {fontStyle: 'italic', color: '#777'}));
+  
+  var years = [2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025, 2026];
+  var yearBands = years.map(function(y) { return generateEcosystemMap(y).rename('y' + y); });
+  var multiYearImage = ee.Image(yearBands);
+  
+  var values = multiYearImage.reduceRegion({
+    reducer: ee.Reducer.first(),
+    geometry: clickPoint,
+    scale: 30 
+  });
+  
+  values.evaluate(function(result, error) {
+    inspectorResultsPanel.clear();
+    if (error) {
+      inspectorResultsPanel.add(ui.Label('Error querying historical data.', {color: 'red'}));
+      return;
+    }
+    
+    if (result) {
+      // 1. Map our classes to custom vertical tick objects: {v: Class_ID, f: Class_Name}
+      var yTicks = CLASSES_LEGEND.map(function(item) {
+        return {v: item.id, f: item.name};
+      });
+      
+      // 2. Build the client-side DataTable array [X-axis (Year), Y-axis (Class ID), Tooltip]
+      var dataTable = [['Year', 'Class ID', {role: 'tooltip', type: 'string'}]];
+      
+      years.forEach(function(y) {
+        var classId = result['y' + y];
+        var matchedClass = CLASSES_LEGEND.filter(function(item) { return item.id === classId; })[0];
+        var className = matchedClass ? matchedClass.name : 'Ocean / No Data';
+        
+        // Push coordinate nodes to our charting array with custom hover tooltips
+        dataTable.push([y, classId, y + ': ' + className]);
+      });
+      
+      // 3. Render the Line Chart directly into the viewport panel
+      var chart = ui.Chart(dataTable, 'LineChart', {
+        title: 'Single-Pixel Trajectory Over Time',
+        hAxis: {
+          title: 'Year',
+          ticks: [2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025, 2026],
+          format: '####', // Prevents calendar years from showing comma separators (e.g. 2,015)
+          textStyle: {fontSize: 8}
+        },
+        vAxis: {
+          title: 'Ecosystem Class',
+          ticks: yTicks, // Dynamically maps the numeric IDs back to their text titles on screen
+          direction: -1,
+          textStyle: {fontSize: 7},
+          viewWindow: {min: 0.5, max: 26.5} // Centers the data lines inside the viewport window
+        },
+        lineWidth: 2,
+        pointSize: 5,
+        colors: ['#1B4F72'], // Classy steel blue matching your app header
+        legend: {position: 'none'},
+        chartArea: {left: 145, top: 30, right: 10, bottom: 40} // Widened left margin to prevent long label clipping
+      });
+      
+      inspectorResultsPanel.add(chart);
+    } else {
+      inspectorResultsPanel.add(ui.Label('No data found at location.'));
+    }
+  });
+}
+
+// Bind the map click logic to all three possible map viewports using mainMap
+mainMap.onClick(onMapClick);
+leftMap.onClick(onMapClick);
+rightMap.onClick(onMapClick);
+
+// Assemble Left sidebar components
+leftSidebar.add(titleLabel);
+leftSidebar.add(descriptionLabel);
+leftSidebar.add(ui.Label('-------------------------------------------------------------------------', {color: '#ddd'}));
+leftSidebar.add(yearHeader);
+leftSidebar.add(yearDropdown);
+leftSidebar.add(loadingLabel);
+leftSidebar.add(ui.Label('-------------------------------------------------------------------------', {color: '#ddd'}));
+leftSidebar.add(highlightHeader);
+leftSidebar.add(ecoDropdown);
+leftSidebar.add(ui.Label('-------------------------------------------------------------------------', {color: '#ddd'}));
+leftSidebar.add(inspectorHeader);
+leftSidebar.add(inspectorDesc);
+leftSidebar.add(inspectorResultsPanel);
+leftSidebar.add(ui.Label('-------------------------------------------------------------------------', {color: '#ddd'}));
+leftSidebar.add(legendHeader);
+leftSidebar.add(legendPanel);
+leftSidebar.add(ui.Label('-------------------------------------------------------------------------', {color: '#ddd'}));
+
+
+// --- H. RIGHT SIDEBAR PANEL: LAND COVER CHANGE DETECTION ---
+var rightSidebar = ui.Panel([], ui.Panel.Layout.flow('vertical'), {
+  width: '320px',
+  padding: '20px',
+  border: '1px solid #ddd'
+});
+
+var changeTitleLabel = ui.Label({
+  value: 'Ecosystem Change Detection',
+  style: {
+    fontSize: '20px',
+    fontWeight: 'bold',
+    color: '#1B4F72',
+    margin: '5px 0 5px 0'
+  }
+});
+
+var changeDescriptionLabel = ui.Label({
+  value: 'Compare two target years to visualize spatial transitions over time. ' +
+         'Set a baseline, comparison, and target ecosystem to extract Gains and Losses.',
+  style: {
+    fontSize: '13px',
+    color: '#555',
+    margin: '0 0 5px 0'
+  }
+});
+
+var yearAHeader = ui.Label({
+  value: 'Select Baseline Year (A):',
+  style: {fontSize: '12px', fontWeight: 'bold', color: '#333', margin: '5px 0 0 0'}
+});
+
+var yearADropdown = ui.Select({
+  items: ['2015', '2016', '2017', '2018', '2019', '2020', '2021', '2022', '2023', '2024', '2025', '2026'],
+  placeholder: 'Year A...',
+  value: '2017',
+  style: {width: '100%', margin: '2px 0 10px 0'}
+});
+
+var yearBHeader = ui.Label({
+  value: 'Select Comparison Year (B):',
+  style: {fontSize: '12px', fontWeight: 'bold', color: '#333', margin: '5px 0 0 0'}
+});
+
+var yearBDropdown = ui.Select({
+  items: ['2015', '2016', '2017', '2018', '2019', '2020', '2021', '2022', '2023', '2024', '2025', '2026'],
+  placeholder: 'Year B...',
+  value: '2026',
+  style: {width: '100%', margin: '2px 0 10px 0'}
+});
+
+var changeEcoHeader = ui.Label({
+  value: 'Target Ecosystem for Dynamics:',
+  style: {fontSize: '12px', fontWeight: 'bold', color: '#333', margin: '5px 0 0 0'}
+});
+
+var changeEcoDropdown = ui.Select({
+  items: ['All Ecosystems (General Change)'].concat(Object.keys(ECOSYSTEM_DICT)),
+  placeholder: 'Select target...',
+  value: 'All Ecosystems (General Change)',
+  style: {width: '100%', margin: '2px 0 15px 0'}
+});
+
+var changeLoadingLabel = ui.Label({
+  value: '',
+  style: {fontSize: '12px', fontStyle: 'italic', color: '#D35400', margin: '5px 0'}
+});
+
+var rightChartHeader = ui.Label({
+  value: 'Dynamics Assessment Summary:',
+  style: {fontSize: '14px', fontWeight: 'bold', color: '#333', margin: '15px 0 5px 0'}
+});
+
+var rightChartPanel = ui.Panel([], ui.Panel.Layout.flow('vertical'), {
+  height: '240px',
+  margin: '5px 0 5px 0'
+});
+
+// Helper function to dynamically generate the Loss/Gain dynamics bar chart (Type-Safe & Memory-Safe!)
+function generateChangeChart(lossMask, gainMask, selectedEco, containerPanel) {
+  containerPanel.clear();
+  containerPanel.add(ui.Label('⚡ Calculating dynamics (250m scale)...', {fontStyle: 'italic', color: '#777'}));
+  
+  var reductionGeometry = ee.FeatureCollection(countryBounds).geometry();
+  var lossArea = ee.Image.pixelArea().divide(10000).updateMask(lossMask);
+  var gainArea = ee.Image.pixelArea().divide(10000).updateMask(gainMask);
+  
+  var lossStats = lossArea.reduceRegion({
+    reducer: ee.Reducer.sum(),
+    geometry: reductionGeometry,
+    scale: 250,     
+    maxPixels: 1e9,
+    tileScale: 16   
+  });
+  
+  var gainStats = gainArea.reduceRegion({
+    reducer: ee.Reducer.sum(),
+    geometry: reductionGeometry,
+    scale: 250,     
+    maxPixels: 1e9,
+    tileScale: 16   
+  });
+  
+  var combinedStats = ee.Dictionary({
+    'Loss': lossStats.get('area'),
+    'Gain': gainStats.get('area')
+  });
+  
+  combinedStats.evaluate(function(result, error) {
+    containerPanel.clear();
+    if (error || !result) {
+      containerPanel.add(ui.Label('Error calculating dynamics statistics.', {color: 'red'}));
+      return;
+    }
+    
+    var lossHa = Math.round(result.Loss || 0);
+    var gainHa = Math.round(result.Gain || 0);
+    
+    var dataTable = [
+      ['Metric', 'Hectares', {role: 'style'}],
+      ['Loss', lossHa, '#FF3131'], // Solid neon red for Loss
+      ['Gain', gainHa, '#00FF33']  // Neon Green for Gain
+    ];
+    
+    var options = {
+      title: selectedEco.split(' (')[0] + ' Dynamics',
+      vAxis: {title: 'Hectares', textStyle: {fontSize: 9}},
+      hAxis: {title: '', textStyle: {fontSize: 10}},
+      legend: {position: 'none'},
+      chartArea: {left: 60, top: 30, width: '70%', height: '70%'}
+    };
+    
+    var chart = ui.Chart(dataTable, 'ColumnChart', options);
+    containerPanel.add(chart);
+  });
+}
+
+// Helper function to generate a chart for general landscape changes (Type-Safe & Memory-Safe!)
+function generateGeneralChangeChart(changeMask, yearA, yearB, containerPanel) {
+  containerPanel.clear();
+  containerPanel.add(ui.Label('⚡ Calculating overall change (250m scale)...', {fontStyle: 'italic', color: '#777'}));
+  
+  var reductionGeometry = ee.FeatureCollection(countryBounds).geometry();
+  var changeArea = ee.Image.pixelArea().divide(10000).updateMask(changeMask);
+  
+  var changeStats = changeArea.reduceRegion({
+    reducer: ee.Reducer.sum(),
+    geometry: reductionGeometry,
+    scale: 250,     
+    maxPixels: 1e9,
+    tileScale: 16   
+  });
+  
+  changeStats.evaluate(function(result, error) {
+    containerPanel.clear();
+    if (error || !result) {
+      containerPanel.add(ui.Label('Error calculating change statistics.', {color: 'red'}));
+      return;
+    }
+    
+    var changeHa = Math.round(result.area || 0);
+    
+    var dataTable = [
+      ['Label', 'Hectares'],
+      ['Total Changed', changeHa]
+    ];
+    
+    var options = {
+      title: 'Overall Transitioned Hectares (' + yearA + '-' + yearB + ')',
+      vAxis: {title: 'Hectares', textStyle: {fontSize: 9}},
+      hAxis: {title: '', textStyle: {fontSize: 10}},
+      legend: {position: 'none'},
+      colors: ['#FF5722'], // Neon Orange for general transition
+      chartArea: {left: 60, top: 30, width: '70%', height: '70%'}
+    };
+    
+    var chart = ui.Chart(dataTable, 'ColumnChart', options);
+    containerPanel.add(chart);
+  });
+}
+
+function removeChangeLayers() {
+  if (lossLayerRef) { rightMap.remove(lossLayerRef); lossLayerRef = null; }
+  if (gainLayerRef) { rightMap.remove(gainLayerRef); gainLayerRef = null; }
+  if (generalChangeLayerRef) { rightMap.remove(generalChangeLayerRef); generalChangeLayerRef = null; }
+  if (mapALayerRef) { leftMap.remove(mapALayerRef); mapALayerRef = null; } 
+  if (mapBLayerRef) { rightMap.remove(mapBLayerRef); mapBLayerRef = null; } 
+  rightChartPanel.clear(); 
+}
+
+function runChangeDetection() {
+  var yearA = parseInt(yearADropdown.getValue(), 10);
+  var yearB = parseInt(yearBDropdown.getValue(), 10);
+  var selectedEco = changeEcoDropdown.getValue();
+  
+  if (yearA === yearB) {
+    changeLoadingLabel.setValue('❌ Error: Baseline and Comparison years must be different.');
+    return;
+  }
+  
+  changeLoadingLabel.setValue('⚡ Generating classification maps and performing change algebra...');
+  removeChangeLayers();
+  clearMarkers();
+  
+  // Swap standard map canvas for the SplitPanel (Phase 3!) using mainMap
+  if (ui.root.widgets().get(1) !== splitPanel) {
+    ui.root.widgets().set(1, splitPanel);
+  }
+  
+  // Align Split Map centers to where the user was looking on the single map
+  leftMap.setCenter(mainMap.getCenter().coordinates().get(0).getInfo(), mainMap.getCenter().coordinates().get(1).getInfo(), mainMap.getZoom());
+  
+  leftMap.layers().reset();
+  rightMap.layers().reset();
+  
+  var mapA = generateEcosystemMap(yearA);
+  var mapB = generateEcosystemMap(yearB);
+  
+  // Add Baseline Map A to the Left Map, and Comparison Map B to the Right Map
+  mapALayerRef = leftMap.addLayer(mapA, {min: 1, max: 26, palette: palette}, "Baseline Map: " + yearA);
+  mapBLayerRef = rightMap.addLayer(mapB, {min: 1, max: 26, palette: palette}, "Comparison Map: " + yearB);
+  
+  if (selectedEco === 'All Ecosystems (General Change)') {
+    var generalChangeMask = mapA.neq(mapB);
+    var generalChangeLayer = ee.Image(1).updateMask(generalChangeMask);
+    
+    generalChangeLayerRef = rightMap.addLayer(
+      generalChangeLayer, 
+      {palette: ['#FF5722']}, // Render General Landscape change in solid Neon Orange
+      'Change: ' + yearA + ' vs ' + yearB
+    );
+    
+    generateGeneralChangeChart(generalChangeMask, yearA, yearB, rightChartPanel);
+    
+  } else {
+    var ecoIds = ECOSYSTEM_DICT[selectedEco];
+    
+    var maskA = mapA.eq(ecoIds[0]);
+    for (var i = 1; i < ecoIds.length; i++) {
+      maskA = maskA.or(mapA.eq(ecoIds[i]));
+    }
+    
+    var maskB = mapB.eq(ecoIds[0]);
+    for (var j = 1; j < ecoIds.length; j++) {
+      maskB = maskB.or(mapB.eq(ecoIds[j]));
+    }
+    
+    var lossMask = maskA.and(maskB.not());
+    var lossLayer = ee.Image(1).updateMask(lossMask);
+    
+    var gainMask = maskA.not().and(maskB);
+    var gainLayer = ee.Image(1).updateMask(gainMask);
+    
+    // Add Loss (Red) and Gain (Neon Green) on the Right Map for swiping contrast
+    lossLayerRef = rightMap.addLayer(lossLayer, {palette: ['#FF3131']}, 'Loss of ' + selectedEco);
+    gainLayerRef = rightMap.addLayer(gainLayer, {palette: ['#00FF33']}, 'Gain of ' + selectedEco);
+    
+    generateChangeChart(lossMask, gainMask, selectedEco, rightChartPanel);
+  }
+  
+  changeLoadingLabel.setValue('');
+}
+
+var runChangeButton = ui.Button({
+  label: 'Run Comparison',
+  onClick: runChangeDetection,
+  style: {width: '100%', margin: '5px 0'}
+});
+
+var clearChangeButton = ui.Button({
+  label: 'Clear Comparison',
+  onClick: function() {
+    removeChangeLayers();
+    clearMarkers();
+    changeLoadingLabel.setValue('');
+    
+    // Revert back to Single Map view using mainMap
+    if (ui.root.widgets().get(1) !== mainMap) {
+      ui.root.widgets().set(1, mainMap);
+      mainMap.setCenter(leftMap.getCenter().coordinates().get(0).getInfo(), leftMap.getCenter().coordinates().get(1).getInfo(), leftMap.getZoom());
+    }
+    
+    updateMap(yearDropdown.getValue());
+  },
+  style: {width: '100%', margin: '5px 0'}
+});
+
+rightSidebar.add(changeTitleLabel);
+rightSidebar.add(changeDescriptionLabel);
+rightSidebar.add(yearAHeader);
+rightSidebar.add(yearADropdown);
+rightSidebar.add(yearBHeader);
+rightSidebar.add(yearBDropdown);
+rightSidebar.add(changeEcoHeader);
+rightSidebar.add(changeEcoDropdown);
+rightSidebar.add(runChangeButton);
+rightSidebar.add(clearChangeButton);
+rightSidebar.add(changeLoadingLabel);
+rightSidebar.add(ui.Label('-------------------------------------------------------------------------', {color: '#ddd'}));
+rightSidebar.add(rightChartHeader);
+rightSidebar.add(rightChartPanel);
+
+// --- I. ASSEMBLE ALL PANELS INTO THE ROOT WINDOW LAYOUT ---
+ui.root.insert(0, leftSidebar);  
+ui.root.add(rightSidebar);       
+
+// ============================================================================
+// 5. INITIALIZATION & LAYOUT SETUP
+// ============================================================================
+// Turn the map pointer into a crosshair to match the active click-inspector using mainMap
+mainMap.style().set('cursor', 'crosshair');
+
+// Center map view over Belize precisely using geographical coordinates
+mainMap.setCenter(-88.5, 17.15, 8);
+
+// Kick off initial rendering for the starting default base map (2026!)
+updateMap('2026');

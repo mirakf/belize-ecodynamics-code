@@ -1,0 +1,481 @@
+/***** Start of imports. If edited, may not auto-convert in the playground. *****/
+var table = ee.FeatureCollection("projects/cas-belizeecosystem/assets/extentbelize2");
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+
+// ============================================================================
+// 1. GLOBAL CONFIGURATION & STATIC ASSETS
+// ============================================================================
+var assetBase = 'projects/ee-mirakf-s25/assets/';
+var assetBase2 = 'projects/cas-belizeecosystem/assets/';
+
+var dem        = ee.Image(assetBase + 'dem');
+var slope      = ee.Image(assetBase + 'slope_sept4');
+var bathy      = ee.Image(assetBase + 'bath_sept3_final');
+var precipitat = ee.Image(assetBase + 'precipitation');
+var gpw_count  = ee.Image(assetBase + 'gpw_count');
+var r2015      = ee.Image(assetBase + 'raster2015');
+var r2011      = ee.Image(assetBase + 'raster2011');
+var r2017      = ee.Image('projects/cas-belizeecosystem/assets/meerman_raster2017');
+
+var SCALE = 30;         // Native Landsat spatial resolution (meters)
+var MAX_PIXELS = 1e13;  // Computation limit safety margin
+
+var countryBounds = table.geometry();
+
+// Master Database used to build the Visual Legend and evaluate Click Inspections
+var CLASSES_LEGEND = [
+  {id: 1,  name: 'Agricultural uses', color: '#F4A460'},
+  {id: 2,  name: 'Coral reef', color: '#40E0D0'},
+  {id: 3,  name: 'Lowland broad-leaved dry forest', color: '#8F9779'},
+  {id: 4,  name: 'Lowland broad-leaved moist forest', color: '#2E8B57'},
+  {id: 5,  name: 'Lowland broad-leaved moist forest: Steep', color: '#1E5631'},
+  {id: 6,  name: 'Lowland broad-leaved moist scrub forest', color: '#A9BA9D'},
+  {id: 7,  name: 'Lowland broad-leaved moist scrub forest: Steep', color: '#7D8C72'},
+  {id: 8,  name: 'Lowland broad-leaved wet forest', color: '#004B23'},
+  {id: 9,  name: 'Lowland broad-leaved wet forest: Steep', color: '#002A14'},
+  {id: 10, name: 'Lowland pine forest', color: '#2D5A27'},
+  {id: 11, name: 'Lowland savanna', color: '#E6C229'},
+  {id: 12, name: 'Mangrove', color: '#FF00FF'},
+  {id: 13, name: 'Open sea', color: '#84d7eb'},
+  {id: 14, name: 'Seagrass', color: '#20B2AA'},
+  {id: 15, name: 'Shrubland', color: '#D2B48C'},
+  {id: 16, name: 'Submontane broad-leaved moist forest', color: '#3F6826'},
+  {id: 17, name: 'Submontane broad-leaved moist forest: Steep', color: '#2A4B1A'},
+  {id: 18, name: 'Submontane broad-leaved wet forest', color: '#1B3B1F'},
+  {id: 19, name: 'Submontane broad-leaved wet forest: Steep', color: '#0D2212'},
+  {id: 20, name: 'Submontane pine forest', color: '#3B7A57'},
+  {id: 21, name: 'Submontane pine forest: Steep', color: '#224D34'},
+  {id: 22, name: 'Urban', color: '#36454F'},
+  {id: 23, name: 'Wasteland', color: '#A9A9A9'},
+  {id: 24, name: 'Water', color: '#4169E1'},
+  {id: 25, name: 'Wetland', color: '#5F9EA0'},
+  {id: 26, name: 'Littoral Forest', color: '#58a279'}
+];
+
+// Ecosystem Class IDs
+var ID_CORAL_REEF   = 2;
+var ID_MANGROVE     = 12;
+var ID_OPEN_SEA     = 13;
+var ID_SEAGRASS     = 14;
+var ID_URBAN        = 22;
+var ID_WATER_INLAND = 24; 
+var ID_WETLAND      = 25; 
+var ID_LITTORAL     = 26;
+var ID_AGRO         = 1;
+
+var palette = [
+  '#F4A460', // 1: Agricultural uses
+  '#40E0D0', // 2: Coral reef
+  '#8F9779', // 3: Lowland broad-leaved dry forest
+  '#2E8B57', // 4: Lowland broad-leaved moist forest
+  '#1E5631', // 5: Lowland broad-leaved moist forest: Steep
+  '#A9BA9D', // 6: Lowland broad-leaved moist scrub forest
+  '#7D8C72', // 7: Lowland broad-leaved moist scrub forest: Steep
+  '#004B23', // 8: Lowland broad-leaved wet forest
+  '#002A14', // 9: Lowland broad-leaved wet forest: Steep
+  '#2D5A27', // 10: Lowland pine forest
+  '#E6C229', // 11: Lowland savanna
+  '#FF00FF', // 12: Mangrove
+  '#84d7eb', // 13: Open sea
+  '#20B2AA', // 14: Seagrass
+  '#D2B48C', // 15: Shrubland
+  '#3F6826', // 16: Submontane broad-leaved moist forest
+  '#2A4B1A', // 17: Submontane broad-leaved moist forest: Steep
+  '#1B3B1F', // 18: Submontane broad-leaved wet forest
+  '#0D2212', // 19: Submontane broad-leaved wet forest: Steep
+  '#3B7A57', // 20: Submontane pine forest
+  '#224D34', // 21: Submontane pine forest: Steep
+  '#36454F', // 22: Urban
+  '#A9A9A9', // 23: Wasteland
+  '#4169E1', // 24: Water
+  '#5F9EA0', // 25: Wetland
+  '#58a279'  // 26: Littoral Forest
+];
+
+// ============================================================================
+// 2. HELPER FUNCTIONS
+// ============================================================================
+function maskL8clouds(img) {
+  var qa = img.select('QA_PIXEL');
+  var mask = qa.bitwiseAnd(1 << 3).eq(0).and(qa.bitwiseAnd(1 << 4).eq(0));
+  return img.updateMask(mask);
+}
+
+function applyL8Scaling(img) {
+  var optical = img.select('SR_B.').multiply(0.0000275).add(-0.2);
+  var thermal = img.select('ST_B.*').multiply(0.00341802).add(149.0);
+  return img.addBands(optical, null, true).addBands(thermal, null, true);
+}
+
+// ============================================================================
+// 3. MASTER ECOSYSTEM CLASSIFICATION PIPELINE FUNCTION
+// ============================================================================
+function generateEcosystemMap(targetYear) {
+  var dates = {
+    dry:    [(targetYear - 1) + '-12-01', targetYear + '-05-31'],
+    wet:    [targetYear + '-06-01', targetYear + '-11-30'],
+    annual: [targetYear + '-01-01', targetYear + '-12-31']
+  };
+
+  var dryStB10Median = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+    .filterBounds(countryBounds)
+    .filterDate(dates.dry[0], dates.dry[1])
+    .map(maskL8clouds)
+    .map(applyL8Scaling)
+    .median()
+    .select(['ST_B10']); 
+
+  var sarDryAngle = ee.ImageCollection('COPERNICUS/S1_GRD')
+    .filterBounds(countryBounds)
+    .filterDate(dates.dry[0], dates.dry[1])
+    .filter(ee.Filter.eq('instrumentMode', 'IW'))
+    .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+    .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+    .median()
+    .select(['angle']);
+
+  var dryB5 = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+    .filterBounds(countryBounds)
+    .filterDate(dates.dry[0], dates.dry[1])
+    .map(maskL8clouds)
+    .map(applyL8Scaling)
+    .median()
+    .select(['SR_B5']);
+
+  var glcmBand = dryB5.select('SR_B5');
+
+  var quantized = glcmBand
+    .unitScale(0.0, 0.6)
+    .clamp(0.0, 1.0)
+    .multiply(31).floor().toInt();
+
+  var g4B5Savg = quantized.glcmTexture({size: 4, average: true})
+    .select(['SR_B5_savg']);
+
+  var allBands = ee.Image([
+    sarDryAngle.rename('sar_dry_angle'),
+    dem.rename('elevation'),
+    slope.rename('slope'),
+    precipitat.rename('precipitat'),
+    gpw_count.rename('gpw_count'),
+    g4B5Savg.rename('g4_sr_b5_savg'),
+    dryStB10Median.rename('dry_st_b10_median'),
+    r2015.rename('d2015'),
+    r2011.rename('d2011'),
+    bathy.rename('bathy')
+  ]).unmask(-9999).clip(countryBounds);
+
+  var trainedClassifier = ee.Classifier.load('projects/cas-belizeecosystem/assets/classifierRF_sep14');
+  var classified = allBands.classify(trainedClassifier);
+
+  var isPredictedTerrestrial = classified.neq(ID_CORAL_REEF)
+    .and(classified.neq(ID_SEAGRASS))
+    .and(classified.neq(ID_OPEN_SEA))
+    .and(classified.neq(ID_MANGROVE))
+    .and(classified.neq(ID_WETLAND))
+    .and(classified.neq(ID_WATER_INLAND));
+
+  var marineOnly = classified.updateMask(
+    classified.eq(ID_CORAL_REEF)
+      .or(classified.eq(ID_SEAGRASS))
+      .or(classified.eq(ID_OPEN_SEA))
+      .or(classified.eq(ID_MANGROVE))
+      .or(classified.eq(ID_WETLAND))
+  );
+
+  var marineInterpolated = marineOnly.focalMode({radius: 15, units: 'meters'});
+
+  var step1MarineCleanup = classified.where(
+    bathy.lt(-1).and(isPredictedTerrestrial),
+    marineInterpolated
+  );
+
+  var step2CoastalSplit = step1MarineCleanup.where(
+    step1MarineCleanup.eq(ID_SEAGRASS).or(step1MarineCleanup.eq(ID_CORAL_REEF)).and(bathy.lt(-20)), 
+    ID_OPEN_SEA
+  );
+
+  step2CoastalSplit = step2CoastalSplit.where(
+    step2CoastalSplit.eq(ID_MANGROVE)
+      .and(classified.eq(ID_MANGROVE))
+      .and(dem.lte(10))
+      .and(dem.gte(2))
+      .and(dryB5.gt(0.23)),
+    ID_LITTORAL
+  );
+
+  var elevationThreshold = 500;
+  var isSubmontaneArea = dem.select('b1').gte(elevationThreshold);
+
+  var lowlandClasses = [4, 5, 8, 9, 10];
+  var submontaneClasses = [16, 17, 18, 19, 20];
+
+  var step3ElevationExchange = step2CoastalSplit;
+
+  for (var i = 0; i < lowlandClasses.length; i++) {
+    var lowland = lowlandClasses[i];
+    var submontane = submontaneClasses[i];
+    
+    step3ElevationExchange = step3ElevationExchange.where(
+      step3ElevationExchange.eq(lowland).and(isSubmontaneArea), 
+      submontane
+    );
+    
+    step3ElevationExchange = step3ElevationExchange.where(
+      step3ElevationExchange.eq(submontane).and(isSubmontaneArea.not()), 
+      lowland
+    );
+  }
+
+  var slopeThreshold = 15;
+  var radiusMeters = 100;
+
+  var neighborhoodSlope = slope.reduceNeighborhood({
+    reducer: ee.Reducer.mean(),
+    kernel: ee.Kernel.square({radius: radiusMeters, units: 'meters'})
+  });
+
+  var isSteepArea = neighborhoodSlope.gt(slopeThreshold);
+
+  var evenClasses = [4, 6, 8, 16, 18, 20];
+  var oddClasses  = [5, 7, 9, 17, 19, 21];
+
+  var step4SlopeExchange = step3ElevationExchange;
+
+  for (var j = 0; j < evenClasses.length; j++) {
+    var nonSteep = evenClasses[j];
+    var steep = oddClasses[j];
+    
+    step4SlopeExchange = step4SlopeExchange.where(
+      step4SlopeExchange.eq(nonSteep).and(isSteepArea), 
+      steep
+    );
+    
+    step4SlopeExchange = step4SlopeExchange.where(
+      step4SlopeExchange.eq(steep).and(isSteepArea.not()), 
+      nonSteep
+    );
+  }
+
+  var step5SmoothedMap = step4SlopeExchange.focalMode({
+    radius: 100,
+    units: 'meters'
+  }).rename('classification');
+
+  return step5SmoothedMap;
+}
+
+// ============================================================================
+// 4. TWO-WAY TEMPORAL STABILIZATION ENGINE (ANTI-POPPING)
+// ============================================================================
+var years = [2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025, 2026];
+
+// Pre-classify all years individually (Raw baseline maps)
+var rawMaps = {};
+years.forEach(function(year) {
+  rawMaps['y' + year] = generateEcosystemMap(year);
+});
+
+// Dictionary to hold our cleaned, stabilized maps
+var stabilizedMaps = {};
+
+// 2017 is our gold-standard anchor year
+stabilizedMaps['y2017'] = rawMaps['y2017'];
+
+// --- A. THE FORWARD PASS (2018 -> 2026) ---
+for (var yForward = 2018; yForward <= 2025; yForward++) {
+  var prevStab = stabilizedMaps['y' + (yForward - 1)]; // Stabilization baseline
+  var currRaw  = rawMaps['y' + yForward];               // Current Year classification
+  var nextRaw  = rawMaps['y' + (yForward + 1)];         // Next Year raw classification
+  
+  // Rule 1: Outlier check. If prev == next and curr != prev, force curr to stay as prev.
+  var isPopForward = prevStab.eq(nextRaw).and(currRaw.neq(prevStab));
+  var repairedForward = currRaw.where(isPopForward, prevStab);
+  
+  // Rule 2: Urban permanence. If previous was Agro (22), current must be Agro.
+repairedForward = repairedForward.where(prevStab.eq(ID_AGRO), ID_AGRO);  
+  stabilizedMaps['y' + yForward] = repairedForward;
+}
+
+// Handle end-of-series boundary year (2026)
+var prevStab2025 = stabilizedMaps['y2025'];
+var raw2026 = rawMaps['y2026'];
+var repaired2026 = raw2026
+  .where(prevStab2025.eq(ID_URBAN), ID_URBAN)
+  .where(prevStab2025.eq(ID_CORAL_REEF).and(raw2026.eq(ID_OPEN_SEA)), ID_CORAL_REEF);
+stabilizedMaps['y2026'] = repaired2026;
+
+
+// --- B. THE BACKWARD PASS (2016 -> 2015) ---
+for (var yBackward = 2016; yBackward >= 2016; yBackward--) {
+  var nextStab = stabilizedMaps['y' + (yBackward + 1)]; // Stabilization baseline (Future)
+  var currRawB = rawMaps['y' + yBackward];               // Current Year (Past)
+  var prevRawB = rawMaps['y' + (yBackward - 1)];         // Prior Year raw (Deep Past)
+  
+  // Rule 1: Outlier check. If next == prev and curr != next, force curr to stay as next.
+  var isPopBackward = nextStab.eq(prevRawB).and(currRawB.neq(nextStab));
+  var repairedBackward = currRawB.where(isPopBackward, nextStab);
+  
+  // Rule 2: Urban permanence (moving backward). If future is NOT urban, past CANNOT be urban.
+  //repairedBackward = repairedBackward.where(nextStab.neq(ID_URBAN).and(repairedBackward.eq(ID_URBAN)), nextStab);
+  
+  // Rule 3: Reef vs Ocean safety (moving backward).
+  //repairedBackward = repairedBackward.where(nextStab.eq(ID_CORAL_REEF).and(currRawB.eq(ID_OPEN_SEA)), ID_CORAL_REEF);
+  
+  stabilizedMaps['y' + yBackward] = repairedBackward;
+}
+
+// Handle start-of-series boundary year (2015)
+var nextStab2016 = stabilizedMaps['y2016'];
+var raw2015 = rawMaps['y2015'];
+var repaired2015 = raw2015
+  .where(nextStab2016.neq(ID_URBAN).and(raw2015.eq(ID_URBAN)), nextStab2016)
+  .where(nextStab2016.eq(ID_CORAL_REEF).and(raw2015.eq(ID_OPEN_SEA)), ID_CORAL_REEF);
+stabilizedMaps['y2015'] = repaired2015;
+
+
+// ============================================================================
+// 5. BATCH EXPORT SCRIPT (GENERATES TASKS AUTOMATICALLY)
+// ============================================================================
+// Loops through all 12 stabilized years and sets up Earth Engine export Tasks.
+// This executes the heavy processing on Google's cloud systems safely.
+years.forEach(function(year) {
+  var cleanImage = stabilizedMaps['y' + year].rename('classification');
+  
+  Export.image.toAsset({
+    image: cleanImage,
+    description: 'Export_Stabilized_Ecosystem_Map_' + year,
+    assetId: 'projects/cas-belizeecosystem/assets/stabilized_map_' + year, // Adjust output path as needed
+    region: countryBounds,
+    scale: SCALE,
+    maxPixels: MAX_PIXELS,
+    pyramidingPolicy: {classification: 'mode'} // Preserves discrete integer IDs
+  });
+});
+
+// Render the baseline 2017 map to confirm visual success
+Map.addLayer(stabilizedMaps['y2017'], {min: 1, max: 26, palette: palette}, "Cleaned Anchor: 2017");
+
+// ============================================================================
+// 6. STABILIZATION VISUAL TESTING & INSPECTION SUITE
+// ============================================================================
+
+// --- A. ADD STABILIZED YEAR LAYERS ---
+// Loads 2017 (baseline) and 2026 (future) maps for toggle comparison
+Map.addLayer(stabilizedMaps['y2017'], {min: 1, max: 26, palette: palette}, "Stabilized Base: 2017", false);
+Map.addLayer(stabilizedMaps['y2026'], {min: 1, max: 26, palette: palette}, "Stabilized Future: 2026", true);
+
+// --- B. GENERATE 2017 vs 2026 TRANSITION MAP ---
+var map2017 = stabilizedMaps['y2017'];
+var map2026 = stabilizedMaps['y2026'];
+
+// Calculate pixels where the ecosystem classification changed
+var changeMask = map2017.neq(map2026);
+var changeLayer = ee.Image(1).updateMask(changeMask);
+
+// Render the transitioned zones in Neon Orange
+Map.addLayer(changeLayer, {palette: ['#FF5722']}, "Ecosystem Change: 2017 vs 2026", true);
+
+// --- C. INTERACTIVE INSPECTOR PANEL ---
+var inspectorPanel = ui.Panel([], ui.Panel.Layout.flow('vertical'), {
+  position: 'bottom-left',
+  padding: '12px',
+  width: '290px',
+  border: '1px solid #ccc'
+});
+
+var inspectorHeader = ui.Label({
+  value: 'Stabilization Checker',
+  style: {fontSize: '15px', fontWeight: 'bold', color: '#1B4F72', margin: '0 0 5px 0'}
+});
+
+var inspectorDesc = ui.Label({
+  value: 'Click any pixel to verify its complete trajectory across all years (2015–2026).',
+  style: {fontSize: '11px', color: '#777', margin: '0 0 8px 0'}
+});
+
+// Added a set height of 220px to display all 12 years beautifully with a scrollbar
+var resultsContainer = ui.Panel([], ui.Panel.Layout.flow('vertical'), {
+  margin: '5px 0',
+  height: '220px', 
+  border: '1px solid #eee',
+  padding: '5px'
+});
+resultsContainer.add(ui.Label('Click map to query pixel trajectory...', {fontSize: '11px', fontStyle: 'italic', color: '#888'}));
+
+inspectorPanel.add(inspectorHeader);
+inspectorPanel.add(inspectorDesc);
+inspectorPanel.add(resultsContainer);
+Map.add(inspectorPanel);
+
+// --- D. INTERACTIVE CLICK LOGGER & MARKER ---
+var inspectorMarkerRef = null;
+Map.style().set('cursor', 'crosshair');
+
+Map.onClick(function(coords) {
+  var clickPoint = ee.Geometry.Point([coords.lon, coords.lat]);
+  
+  // 1. Drop the Cyan marker dot on the clicked pixel
+  if (inspectorMarkerRef) {
+    Map.remove(inspectorMarkerRef);
+  }
+  inspectorMarkerRef = Map.addLayer(clickPoint, {color: '#00FFFF'}, 'Inspection Location');
+  
+  // 2. Set loading status
+  resultsContainer.clear();
+  resultsContainer.add(ui.Label('⚡ Querying stabilized history...', {fontStyle: 'italic', color: '#D35400', fontSize: '11px'}));
+  
+  // 3. Stack ALL 12 years dynamically
+  var testYears = [2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025, 2026];
+  var bands = testYears.map(function(y) {
+    return stabilizedMaps['y' + y].rename('y' + y);
+  });
+  var stack = ee.Image(bands);
+  
+  // 4. Reduce region to extract the exact pixel values
+  var values = stack.reduceRegion({
+    reducer: ee.Reducer.first(),
+    geometry: clickPoint,
+    scale: 30
+  });
+  
+  // 5. Build the visual output inside the panel
+  values.evaluate(function(result, error) {
+    resultsContainer.clear();
+    if (error) {
+      resultsContainer.add(ui.Label('Error querying location.', {color: 'red', fontSize: '11px'}));
+      return;
+    }
+    
+    if (result) {
+      testYears.forEach(function(y) {
+        var classId = result['y' + y];
+        var matchedClass = CLASSES_LEGEND.filter(function(item) {
+          return item.id === classId;
+        })[0];
+        
+        var className = matchedClass ? matchedClass.name : 'Ocean / No Data';
+        var color = matchedClass ? matchedClass.color : '#999999';
+        
+        var bullet = ui.Label({
+          style: {
+            backgroundColor: color,
+            padding: '5px',
+            margin: '3px 8px 0 0',
+            border: '1px solid #555'
+          }
+        });
+        
+        var label = ui.Label({
+          value: y + ': ' + className,
+          style: {fontSize: '11px', margin: '2px 0 0 0'}
+        });
+        
+        var row = ui.Panel([bullet, label], ui.Panel.Layout.flow('horizontal'), {margin: '2px 0'});
+        resultsContainer.add(row);
+      });
+    } else {
+      resultsContainer.add(ui.Label('No data found at clicked location.', {fontSize: '11px'}));
+    }
+  });
+});
